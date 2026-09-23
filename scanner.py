@@ -36,12 +36,12 @@ log = logging.getLogger("scanner")
 
 
 # ---------------------------------------------------------------------------
-# Configurazione
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Config:
-    exchange_id: str = "binance"
+    exchange_id: str = "kucoin"
     quote_currency: str = "USDT"      # scansiona tutte le coppie X/USDT
     timeframe: str = "1h"             # timeframe delle candele
     candles_needed: int = 30          # candele storiche da scaricare per simbolo
