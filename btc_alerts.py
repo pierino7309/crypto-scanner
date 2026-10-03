@@ -33,6 +33,14 @@ from pathlib import Path
 
 import requests
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+except Exception:  # se matplotlib manca, si invia solo il testo
+    plt = None
+
 log = logging.getLogger("btc_alerts")
 
 SPOT_CANDLES_URL = "https://api.kucoin.com/api/v1/market/candles"
@@ -92,6 +100,92 @@ def fetch_futures_snapshot() -> dict:
         "oi_btc": oi_contracts * multiplier if oi_contracts else None,
         "mark": float(d.get("markPrice") or 0) or None,
     }
+
+
+def fetch_candles_48h() -> list[dict]:
+    """Candele 1h delle ultime 48 ore, per il grafico."""
+    now = int(time.time())
+    resp = requests.get(
+        SPOT_CANDLES_URL,
+        params={"type": "1hour", "symbol": "BTC-USDT", "startAt": now - 48 * 3600, "endAt": now},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    rows = resp.json().get("data") or []
+    candles = [
+        {"ts": int(r[0]), "open": float(r[1]), "close": float(r[2]),
+         "high": float(r[3]), "low": float(r[4])}
+        for r in rows
+    ]
+    candles.sort(key=lambda c: c["ts"])
+    return candles
+
+
+# ---------------------------------------------------------------------------
+# Grafico
+# ---------------------------------------------------------------------------
+
+def make_chart(candles: list[dict], fut: dict, path: str = "btc_chart.png") -> str | None:
+    """Grafico a candele 48h con i livelli chiave, funding e open interest."""
+    if plt is None or len(candles) < 5:
+        return None
+    from datetime import datetime, timezone, timedelta
+
+    tz_it = timezone(timedelta(hours=2 if 3 < time.gmtime().tm_mon < 11 else 1))
+    xs = [datetime.fromtimestamp(c["ts"], tz=tz_it) for c in candles]
+    width = 0.7 / 24
+
+    bg, fg, grid = "#0f1115", "#e6e6e6", "#2a2d35"
+    up, down = "#26a69a", "#ef5350"
+    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=130)
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+
+    for x, c in zip(xs, candles):
+        col = up if c["close"] >= c["open"] else down
+        ax.vlines(x, c["low"], c["high"], color=col, linewidth=1)
+        lo, hi = sorted((c["open"], c["close"]))
+        ax.bar(x, max(hi - lo, c["close"] * 0.0002), width, bottom=lo, color=col)
+
+    ymin = min(c["low"] for c in candles)
+    ymax = max(c["high"] for c in candles)
+    pad = (ymax - ymin) * 0.08
+    for lvl in LEVELS:
+        if ymin - 3 * pad <= lvl <= ymax + 3 * pad:
+            ax.axhline(lvl, color="#f5b942", linestyle="--", linewidth=1.2, alpha=0.9)
+            ax.text(xs[0], lvl, f" {lvl:,.0f} $", color="#f5b942", va="bottom", fontsize=9)
+            ymin, ymax = min(ymin, lvl), max(ymax, lvl)
+    ax.set_ylim(ymin - pad, ymax + pad)
+
+    last = candles[-1]["close"]
+    ax.axhline(last, color="#4aa3ff", linewidth=0.8, alpha=0.6)
+    ax.annotate(f"{last:,.0f} $", xy=(xs[-1], last), xytext=(8, 0),
+                textcoords="offset points", color="white", fontsize=10, va="center",
+                bbox=dict(boxstyle="round,pad=0.3", fc="#4aa3ff", ec="none"))
+
+    ch = (last - candles[0]["open"]) / candles[0]["open"] * 100
+    ax.set_title(f"BTC/USDT  ·  ultime 48 ore (1h)  ·  {ch:+.1f}%", color=fg, fontsize=13, loc="left")
+
+    info = []
+    if fut.get("funding") is not None:
+        info.append(f"Funding {fut['funding'] * 100:.3f}%")
+    if fut.get("oi_btc"):
+        info.append(f"Open interest {fut['oi_btc']:,.0f} BTC")
+    if info:
+        ax.text(0.99, 0.02, "   ·   ".join(info), transform=ax.transAxes, ha="right",
+                color="#9aa0aa", fontsize=9)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %H:%M", tz=tz_it))
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    ax.tick_params(colors=fg, labelsize=9)
+    ax.grid(color=grid, linewidth=0.6)
+    for sp in ax.spines.values():
+        sp.set_color(grid)
+    ax.margins(x=0.02)
+    fig.tight_layout()
+    fig.savefig(path, facecolor=bg)
+    plt.close(fig)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +290,34 @@ def send_telegram(text: str) -> None:
     resp.raise_for_status()
 
 
+def send_telegram_photo(path: str, caption: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        log.info("Telegram non configurato. Grafico salvato in %s", path)
+        return
+    with open(path, "rb") as f:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data={"chat_id": chat_id, "caption": caption[:1024]},
+            files={"photo": f},
+            timeout=30,
+        )
+    resp.raise_for_status()
+
+
+def send_with_chart(msg: str, fut: dict) -> None:
+    """Invia il messaggio con il grafico; se qualcosa va storto, solo testo."""
+    try:
+        chart = make_chart(fetch_candles_48h(), fut)
+        if chart:
+            send_telegram_photo(chart, msg)
+            return
+    except Exception as exc:
+        log.warning("Grafico non inviato (%s), mando solo il testo", exc)
+    send_telegram(msg)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     state = load_state()
@@ -218,7 +340,15 @@ def main() -> int:
     if alerts:
         msg = "🚨 ALLARME BTC\n\n" + "\n".join(alerts) + "\n\nInformazioni, non consulenza finanziaria."
         print(msg)
-        send_telegram(msg)
+        send_with_chart(msg, fut)
+    elif os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        # avvio manuale da GitHub: manda comunque una "foto" della situazione
+        prezzo = candles[-1]["close"] if candles else fut.get("mark")
+        msg = "📊 BTC: situazione attuale (nessun allarme)"
+        if prezzo:
+            msg += f"\nPrezzo: {prezzo:,.0f} $"
+        msg += "\nLivelli: " + " / ".join(f"{l:,.0f} $" for l in LEVELS)
+        send_with_chart(msg, fut)
     else:
         log.info("Nessun allarme BTC.")
     return 0
