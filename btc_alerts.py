@@ -102,12 +102,15 @@ def fetch_futures_snapshot() -> dict:
     }
 
 
+GIORNI_GRAFICO = 90
+
+
 def fetch_candles_48h() -> list[dict]:
-    """Candele 1h delle ultime 48 ore, per il grafico."""
+    """Candele giornaliere (1D) degli ultimi 90 giorni, per il grafico."""
     now = int(time.time())
     resp = requests.get(
         SPOT_CANDLES_URL,
-        params={"type": "1hour", "symbol": "BTC-USDT", "startAt": now - 48 * 3600, "endAt": now},
+        params={"type": "1day", "symbol": "BTC-USDT", "startAt": now - GIORNI_GRAFICO * 86400, "endAt": now},
         timeout=15,
     )
     resp.raise_for_status()
@@ -126,14 +129,14 @@ def fetch_candles_48h() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def make_chart(candles: list[dict], fut: dict, path: str = "btc_chart.png") -> str | None:
-    """Grafico a candele 48h con i livelli chiave, funding e open interest."""
+    """Grafico a candele giornaliere con i livelli chiave, funding e open interest."""
     if plt is None or len(candles) < 5:
         return None
     from datetime import datetime, timezone, timedelta
 
     tz_it = timezone(timedelta(hours=2 if 3 < time.gmtime().tm_mon < 11 else 1))
     xs = [datetime.fromtimestamp(c["ts"], tz=tz_it) for c in candles]
-    width = 0.7 / 24
+    width = 0.7
 
     bg, fg, grid = "#0f1115", "#e6e6e6", "#2a2d35"
     up, down = "#26a69a", "#ef5350"
@@ -164,7 +167,7 @@ def make_chart(candles: list[dict], fut: dict, path: str = "btc_chart.png") -> s
                 bbox=dict(boxstyle="round,pad=0.3", fc="#4aa3ff", ec="none"))
 
     ch = (last - candles[0]["open"]) / candles[0]["open"] * 100
-    ax.set_title(f"BTC/USDT  ·  ultime 48 ore (1h)  ·  {ch:+.1f}%", color=fg, fontsize=13, loc="left")
+    ax.set_title(f"BTC/USDT  ·  ultimi {GIORNI_GRAFICO} giorni (1D)  ·  {ch:+.1f}%", color=fg, fontsize=13, loc="left")
 
     info = []
     if fut.get("funding") is not None:
@@ -175,7 +178,7 @@ def make_chart(candles: list[dict], fut: dict, path: str = "btc_chart.png") -> s
         ax.text(0.99, 0.02, "   ·   ".join(info), transform=ax.transAxes, ha="right",
                 color="#9aa0aa", fontsize=9)
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %H:%M", tz=tz_it))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m", tz=tz_it))
     ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
     ax.tick_params(colors=fg, labelsize=9)
     ax.grid(color=grid, linewidth=0.6)
@@ -351,6 +354,13 @@ def main() -> int:
         send_with_chart(msg, fut)
     else:
         log.info("Nessun allarme BTC.")
+
+    # Whale alert: grandi trasferimenti on-chain (file whale_alert.py)
+    try:
+        import whale_alert
+        whale_alert.esegui(send_telegram)
+    except ImportError:
+        log.info("whale_alert.py non presente, salto.")
     return 0
 
 
