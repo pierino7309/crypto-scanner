@@ -359,8 +359,41 @@ def evaluate_fib(daily: list[dict], state: dict) -> tuple[list[str], dict]:
             nxt = f"\n   Prossimo supporto: {sotto[-1]:,.0f} $" if sotto else ""
             alerts.append(f"🔴 Chiusura giornaliera SOTTO {name} ({lvl:,.0f} $), "
                           f"chiusura {p1:,.0f} $ → supporto rotto, ora può fare da resistenza{nxt}")
+    alerts += fib_signal(p0, p1, prices)
     new_state["last_daily_ts"] = last["ts"]
     return alerts, new_state
+
+
+STOP_PCT = _env_float("BTC_FIB_STOP_PCT", 1.5)  # stop oltre il livello rotto, in %
+
+
+def fib_signal(p0: float, p1: float, prices: list[float]) -> list[str]:
+    """Un solo segnale COMPRA/VENDI per giornata, con stop e obiettivo."""
+    up = [l for l in prices if p0 < l <= p1]
+    dn = [l for l in prices if p0 >= l > p1]
+    if up:
+        lvl = max(up)
+        stop = lvl * (1 - STOP_PCT / 100)
+        sopra = [l for l in prices if l > p1]
+        if not sopra:
+            return [f"📌 SEGNALE TECNICO: 🟢 COMPRA (rialzista)\n   Stop: {stop:,.0f} $ · nessun livello Fibonacci sopra"]
+        tgt = sopra[0]
+        rr = (tgt - p1) / (p1 - stop) if p1 > stop else 0
+        return [f"📌 SEGNALE TECNICO: 🟢 COMPRA (rialzista)\n"
+                f"   Entrata ~{p1:,.0f} $ · Stop {stop:,.0f} $ · Obiettivo {tgt:,.0f} $\n"
+                f"   Rischio/rendimento 1:{rr:.1f}" + ("  ⚠️ basso, valuta di aspettare" if rr < 1.5 else "")]
+    if dn:
+        lvl = min(dn)
+        stop = lvl * (1 + STOP_PCT / 100)
+        sotto = [l for l in prices if l < p1]
+        if not sotto:
+            return [f"📌 SEGNALE TECNICO: 🔴 VENDI (ribassista)\n   Stop: {stop:,.0f} $ · nessun livello Fibonacci sotto"]
+        tgt = sotto[-1]
+        rr = (p1 - tgt) / (stop - p1) if stop > p1 else 0
+        return [f"📌 SEGNALE TECNICO: 🔴 VENDI (ribassista)\n"
+                f"   Entrata ~{p1:,.0f} $ · Stop {stop:,.0f} $ · Obiettivo {tgt:,.0f} $\n"
+                f"   Rischio/rendimento 1:{rr:.1f}" + ("  ⚠️ basso, valuta di aspettare" if rr < 1.5 else "")]
+    return []
 
 
 def fib_position(price: float) -> str:
@@ -449,7 +482,7 @@ def main() -> int:
     log.info("Stato: %s", new_state)
 
     if alerts:
-        msg = "🚨 ALLARME BTC\n\n" + "\n".join(alerts) + "\n\nInformazioni, non consulenza finanziaria."
+        msg = "🚨 ALLARME BTC\n\n" + "\n".join(alerts) + "\n\nSegnale automatico: informazioni, non consulenza finanziaria. Prova prima in simulazione, niente leva alta."
         print(msg)
         send_with_chart(msg, fut)
     elif os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
