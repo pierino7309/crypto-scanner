@@ -134,19 +134,20 @@ def fetch_futures_snapshot() -> dict:
     }
 
 
-def fetch_closed_daily_candles(limit: int = 3) -> list[dict]:
-    """Ultime candele giornaliere CHIUSE di BTC-USDT spot, dalla più vecchia alla più recente."""
+def fetch_closed_daily_candles(limit: int = 210) -> list[dict]:
+    """Ultime candele giornaliere CHIUSE di BTC-USDT spot (con volume), dalla più vecchia alla più recente.
+    Ne servono ~200 per la media mobile a 200 giorni."""
     now = int(time.time())
     resp = requests.get(
         SPOT_CANDLES_URL,
-        params={"type": "1day", "symbol": "BTC-USDT", "startAt": now - 6 * 86400, "endAt": now},
+        params={"type": "1day", "symbol": "BTC-USDT", "startAt": now - (limit + 5) * 86400, "endAt": now},
         timeout=15,
     )
     resp.raise_for_status()
     rows = resp.json().get("data") or []
     candles = [
         {"ts": int(r[0]), "open": float(r[1]), "close": float(r[2]),
-         "high": float(r[3]), "low": float(r[4])}
+         "high": float(r[3]), "low": float(r[4]), "volume": float(r[5])}
         for r in rows
     ]
     candles = [c for c in candles if c["ts"] + 86400 <= now]  # solo candele chiuse
@@ -359,7 +360,7 @@ def evaluate_fib(daily: list[dict], state: dict) -> tuple[list[str], dict]:
             nxt = f"\n   Prossimo supporto: {sotto[-1]:,.0f} $" if sotto else ""
             alerts.append(f"🔴 Chiusura giornaliera SOTTO {name} ({lvl:,.0f} $), "
                           f"chiusura {p1:,.0f} $ → supporto rotto, ora può fare da resistenza{nxt}")
-    alerts += fib_signal(p0, p1, prices)
+    alerts += fib_signal(p0, p1, prices, daily_filters(daily))
     new_state["last_daily_ts"] = last["ts"]
     return alerts, new_state
 
@@ -367,10 +368,56 @@ def evaluate_fib(daily: list[dict], state: dict) -> tuple[list[str], dict]:
 STOP_PCT = _env_float("BTC_FIB_STOP_PCT", 1.5)  # stop oltre il livello rotto, in %
 
 
-def fib_signal(p0: float, p1: float, prices: list[float]) -> list[str]:
-    """Un solo segnale COMPRA/VENDI per giornata, con stop e obiettivo."""
+def daily_filters(daily: list[dict]) -> dict:
+    """Media mobile 200 giorni e volume medio 20 giorni, calcolati sulle candele giornaliere chiuse."""
+    out = {"sma200": None, "vol": None, "vol_avg": None}
+    if len(daily) >= 200:
+        out["sma200"] = sum(c["close"] for c in daily[-200:]) / 200
+    vols = [c.get("volume") for c in daily]
+    if len(daily) >= 21 and all(v is not None for v in vols[-21:]):
+        out["vol"] = vols[-1]
+        out["vol_avg"] = sum(vols[-21:-1]) / 20
+    return out
+
+
+def check_filters(side: str, price: float, f: dict) -> tuple[bool, list[str]]:
+    """Confluenza: tendenza (media 200) + volume sopra la media. Ritorna (ok, righe di spiegazione)."""
+    righe, ok = [], True
+    sma = f.get("sma200")
+    if sma:
+        toro = price > sma
+        giusto = toro if side == "COMPRA" else not toro
+        righe.append(f"{'✅' if giusto else '❌'} Tendenza: prezzo {'sopra' if toro else 'sotto'} media 200 "
+                     f"({sma:,.0f} $) → {'🐂 Toro' if toro else '🐻 Orso'}")
+        ok &= giusto
+    else:
+        righe.append("➖ Tendenza: dati insufficienti, filtro non applicato")
+    vol, avg = f.get("vol"), f.get("vol_avg")
+    if vol and avg:
+        forte = vol >= avg
+        righe.append(f"{'✅' if forte else '❌'} Volume: {vol / avg * 100:.0f}% della media 20 giorni")
+        ok &= forte
+    else:
+        righe.append("➖ Volume: dati insufficienti, filtro non applicato")
+    return ok, righe
+
+
+def fib_signal(p0: float, p1: float, prices: list[float], filters: dict | None = None) -> list[str]:
+    """Un solo segnale COMPRA/VENDI per giornata, con stop e obiettivo.
+    Il segnale viene dato solo se tendenza e volume sono d'accordo (confluenza)."""
     up = [l for l in prices if p0 < l <= p1]
     dn = [l for l in prices if p0 >= l > p1]
+    side = "COMPRA" if up else "VENDI" if dn else None
+    if side is None:
+        return []
+    ok, righe = check_filters(side, p1, filters or {})
+    conferme = "\n   " + "\n   ".join(righe)
+    if not ok:
+        return [f"⚪ Segnale {side} NON confermato: niente operazione{conferme}"]
+    return [m + conferme for m in _fib_signal_core(p0, p1, prices, up, dn)]
+
+
+def _fib_signal_core(p0: float, p1: float, prices: list[float], up: list[float], dn: list[float]) -> list[str]:
     if up:
         lvl = max(up)
         stop = lvl * (1 - STOP_PCT / 100)
