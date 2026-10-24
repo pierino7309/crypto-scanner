@@ -58,6 +58,38 @@ def _env_float(name: str, default: float) -> float:
 LEVELS = sorted(
     float(x) for x in (os.getenv("BTC_LEVELS") or "80000,88000").split(",") if x.strip()
 )
+
+# Livelli Fibonacci controllati sulla CHIUSURA GIORNALIERA (conferma, non primo tocco).
+# Formato: "prezzo=nome;prezzo=nome". Calcolati su:
+#   grande ribasso  116.380 (27/10/2025) -> 57.760 (01/07/2026)
+#   rialzo recente   57.760 (01/07/2026) -> 87.385 (21/09/2026)
+DEFAULT_FIB = (
+    "69076=Fib 0.618 rialzo recente;"
+    "71593=Fib 0.236 grande ribasso;"
+    "72572=Fib 0.5 rialzo recente;"
+    "76068=Fib 0.382 rialzo recente;"
+    "80152=Fib 0.382 grande ribasso;"
+    "80393=Fib 0.236 rialzo recente;"
+    "87069=Fib 0.5 grande ribasso;"
+    "93987=Fib 0.618 grande ribasso;"
+    "103835=Fib 0.786 grande ribasso"
+)
+
+
+def _parse_fib(raw: str) -> list[tuple[float, str]]:
+    out = []
+    for part in raw.split(";"):
+        if "=" not in part:
+            continue
+        price, name = part.split("=", 1)
+        try:
+            out.append((float(price.strip()), name.strip()))
+        except ValueError:
+            continue
+    return sorted(out)
+
+
+FIB_LEVELS = _parse_fib(os.getenv("BTC_FIB_LEVELS") or DEFAULT_FIB)
 MOVE_1H_PCT = _env_float("BTC_MOVE_1H_PCT", 3.0)
 FUNDING_HIGH = _env_float("BTC_FUNDING_HIGH", 0.0003)
 OI_CHANGE_PCT = _env_float("BTC_OI_CHANGE_PCT", 5.0)
@@ -100,6 +132,26 @@ def fetch_futures_snapshot() -> dict:
         "oi_btc": oi_contracts * multiplier if oi_contracts else None,
         "mark": float(d.get("markPrice") or 0) or None,
     }
+
+
+def fetch_closed_daily_candles(limit: int = 3) -> list[dict]:
+    """Ultime candele giornaliere CHIUSE di BTC-USDT spot, dalla più vecchia alla più recente."""
+    now = int(time.time())
+    resp = requests.get(
+        SPOT_CANDLES_URL,
+        params={"type": "1day", "symbol": "BTC-USDT", "startAt": now - 6 * 86400, "endAt": now},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    rows = resp.json().get("data") or []
+    candles = [
+        {"ts": int(r[0]), "open": float(r[1]), "close": float(r[2]),
+         "high": float(r[3]), "low": float(r[4])}
+        for r in rows
+    ]
+    candles = [c for c in candles if c["ts"] + 86400 <= now]  # solo candele chiuse
+    candles.sort(key=lambda c: c["ts"])
+    return candles[-limit:]
 
 
 GIORNI_GRAFICO = 90
@@ -158,6 +210,15 @@ def make_chart(candles: list[dict], fut: dict, path: str = "btc_chart.png") -> s
             ax.axhline(lvl, color="#f5b942", linestyle="--", linewidth=1.2, alpha=0.9)
             ax.text(xs[0], lvl, f" {lvl:,.0f} $", color="#f5b942", va="bottom", fontsize=9)
             ymin, ymax = min(ymin, lvl), max(ymax, lvl)
+    prev_lbl, flip = None, False
+    for lvl, name in FIB_LEVELS:
+        if ymin - pad <= lvl <= ymax + pad:
+            ax.axhline(lvl, color="#b48cff", linestyle=":", linewidth=1.1, alpha=0.9)
+            # se due livelli sono vicini, un'etichetta sotto la linea e una sopra
+            flip = (not flip) if prev_lbl is not None and lvl - prev_lbl < (ymax - ymin) * 0.04 else False
+            ax.text(xs[-1], lvl, f"{name} {lvl:,.0f} ", color="#b48cff",
+                    va="bottom" if flip else "top", ha="right", fontsize=8)
+            prev_lbl = lvl
     ax.set_ylim(ymin - pad, ymax + pad)
 
     last = candles[-1]["close"]
@@ -275,6 +336,45 @@ def evaluate(candles: list[dict], fut: dict, state: dict) -> tuple[list[str], di
     return alerts, new_state
 
 
+def evaluate_fib(daily: list[dict], state: dict) -> tuple[list[str], dict]:
+    """Avvisa quando una candela GIORNALIERA chiude oltre un livello Fibonacci.
+    Ogni giornata viene valutata una sola volta (stato: last_daily_ts)."""
+    alerts: list[str] = []
+    new_state = dict(state)
+    if len(daily) < 2:
+        return alerts, new_state
+    prev, last = daily[-2], daily[-1]
+    if last["ts"] == state.get("last_daily_ts"):
+        return alerts, new_state
+    p0, p1 = prev["close"], last["close"]
+    prices = [lvl for lvl, _ in FIB_LEVELS]
+    for lvl, name in FIB_LEVELS:
+        if p0 < lvl <= p1:
+            sopra = [p for p in prices if p > p1]
+            nxt = f"\n   Prossimo livello sopra: {sopra[0]:,.0f} $" if sopra else ""
+            alerts.append(f"🟢 Chiusura giornaliera SOPRA {name} ({lvl:,.0f} $), "
+                          f"chiusura {p1:,.0f} $ → livello superato, ora può fare da supporto{nxt}")
+        elif p0 >= lvl > p1:
+            sotto = [p for p in prices if p < p1]
+            nxt = f"\n   Prossimo supporto: {sotto[-1]:,.0f} $" if sotto else ""
+            alerts.append(f"🔴 Chiusura giornaliera SOTTO {name} ({lvl:,.0f} $), "
+                          f"chiusura {p1:,.0f} $ → supporto rotto, ora può fare da resistenza{nxt}")
+    new_state["last_daily_ts"] = last["ts"]
+    return alerts, new_state
+
+
+def fib_position(price: float) -> str:
+    """Testo breve: tra quali livelli Fibonacci si trova il prezzo."""
+    sotto = [(l, n) for l, n in FIB_LEVELS if l <= price]
+    sopra = [(l, n) for l, n in FIB_LEVELS if l > price]
+    parti = []
+    if sotto:
+        parti.append(f"supporto {sotto[-1][1]} {sotto[-1][0]:,.0f} $")
+    if sopra:
+        parti.append(f"resistenza {sopra[0][1]} {sopra[0][0]:,.0f} $")
+    return "Fibonacci: " + " · ".join(parti) if parti else ""
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -337,6 +437,14 @@ def main() -> int:
         fut = {}
 
     alerts, new_state = evaluate(candles, fut, state)
+
+    try:
+        daily = fetch_closed_daily_candles()
+    except Exception as exc:
+        log.warning("Candele giornaliere non disponibili: %s", exc)
+        daily = []
+    fib_alerts, new_state = evaluate_fib(daily, new_state)
+    alerts += fib_alerts
     save_state(new_state)
     log.info("Stato: %s", new_state)
 
@@ -351,6 +459,8 @@ def main() -> int:
         if prezzo:
             msg += f"\nPrezzo: {prezzo:,.0f} $"
         msg += "\nLivelli: " + " / ".join(f"{l:,.0f} $" for l in LEVELS)
+        if prezzo and FIB_LEVELS:
+            msg += "\n" + fib_position(prezzo)
         send_with_chart(msg, fut)
     else:
         log.info("Nessun allarme BTC.")
