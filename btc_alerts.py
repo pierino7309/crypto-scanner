@@ -337,6 +337,68 @@ def evaluate(candles: list[dict], fut: dict, state: dict) -> tuple[list[str], di
     return alerts, new_state
 
 
+# ---------------------------------------------------------------------------
+# Setup Short / Long BTC (stessi livelli degli script TradingView)
+# ---------------------------------------------------------------------------
+SETUP = {
+    "short_entry": 80330, "short_stop": 81500, "short_tp1": 76500, "short_tp2": 73000,
+    "a_lo": 76000, "a_hi": 76600, "a_stop": 74500, "a_tp1": 80400, "a_tp2": 84900,
+    "b_lvl": 80400, "b_stop": 78900, "b_tp1": 84900, "b_tp2": 86400,
+}
+# livelli "toccati" (controllo orario su massimo/minimo): nome, prezzo, direzione, messaggio
+SETUP_TOUCH = [
+    ("short_tp1", SETUP["short_tp1"], "down", "🎯 Obiettivo 1 SHORT raggiunto (76.500): prendi metà profitto e sposta lo stop a pareggio.\n   È anche la zona del LONG A: aspetta la chiusura giornaliera per un BUY A."),
+    ("short_tp2", SETUP["short_tp2"], "down", "🎯 Obiettivo 2 SHORT raggiunto (73.000): vicino alla media 200, valuta di chiudere tutto."),
+    ("long_tp_84900", SETUP["a_tp2"], "up", "🎯 84.900 raggiunto: obiettivo 2 LONG A / obiettivo 1 LONG B. Prendi profitto e sposta lo stop."),
+    ("long_tp_86400", SETUP["b_tp2"], "up", "🎯 86.400 raggiunto: obiettivo 2 LONG B."),
+]
+
+
+def evaluate_setups(daily: list[dict], hourly: list[dict], state: dict) -> tuple[list[str], dict]:
+    """Avvisi dei setup Short/Long: entrate e stop sulla CHIUSURA GIORNALIERA,
+    obiettivi appena toccati (candela oraria). Ogni avviso viene mandato una sola volta."""
+    S = SETUP
+    alerts: list[str] = []
+    new_state = dict(state)
+
+    # 1. Entrate e stop: una volta per candela giornaliera chiusa
+    if len(daily) >= 2 and daily[-1]["ts"] != state.get("setup_daily_ts"):
+        prev, last = daily[-2], daily[-1]
+        p0, p1 = prev["close"], last["close"]
+        if p0 >= S["short_entry"] > p1:
+            alerts.append(f"🔴 SETUP SHORT: chiusura giornaliera sotto {S['short_entry']:,.0f} $ ({p1:,.0f} $)\n"
+                          f"   Piano prudente: aspetta il ritorno verso 80.400–81.000 e entra se viene respinto.\n"
+                          f"   Stop {S['short_stop']:,.0f} · Obiettivi {S['short_tp1']:,.0f} → {S['short_tp2']:,.0f}")
+        if p0 <= S["short_stop"] < p1:
+            alerts.append(f"⛔ SETUP SHORT: chiusura sopra lo stop prudente {S['short_stop']:,.0f} $ → idea short sbagliata, ESCI.")
+        if p0 <= S["b_lvl"] < p1:
+            alerts.append(f"🟢 SETUP LONG B: chiusura giornaliera sopra {S['b_lvl']:,.0f} $ ({p1:,.0f} $) → la rottura era falsa.\n"
+                          f"   Stop {S['b_stop']:,.0f} · Obiettivi {S['b_tp1']:,.0f} (metà) → {S['b_tp2']:,.0f}")
+        if last["low"] <= S["a_hi"] and last["low"] > S["a_stop"] and p1 > S["a_hi"] and p1 > last["open"]:
+            alerts.append(f"🟢 SETUP LONG A: rimbalzo sulla zona {S['a_lo']:,.0f}–{S['a_hi']:,.0f} $ (min {last['low']:,.0f}, chiusura {p1:,.0f})\n"
+                          f"   Stop {S['a_stop']:,.0f} · Obiettivi {S['a_tp1']:,.0f} (metà) → {S['a_tp2']:,.0f}")
+        if p0 >= S["a_stop"] > p1:
+            alerts.append(f"⛔ SETUP LONG A: chiusura sotto lo stop {S['a_stop']:,.0f} $ → supporto rotto, ESCI dal long.")
+        if p0 >= S["b_stop"] > p1 and p0 > S["b_lvl"] * 0.97:
+            alerts.append(f"⛔ SETUP LONG B: chiusura sotto lo stop {S['b_stop']:,.0f} $ → ESCI dal long B.")
+        new_state["setup_daily_ts"] = last["ts"]
+
+    # 2. Obiettivi: appena il prezzo li tocca (ultima candela oraria chiusa)
+    touched = dict(state.get("setup_touched") or {})
+    if hourly:
+        h = hourly[-1]
+        for name, lvl, direction, msg in SETUP_TOUCH:
+            hit = h["low"] <= lvl if direction == "down" else h["high"] >= lvl
+            lontano = h["close"] > lvl * 1.03 if direction == "down" else h["close"] < lvl * 0.97
+            if hit and not touched.get(name):
+                alerts.append(msg)
+                touched[name] = True
+            elif lontano and touched.get(name):
+                touched[name] = False  # il prezzo si è allontanato: l'avviso si riarma
+    new_state["setup_touched"] = touched
+    return alerts, new_state
+
+
 def evaluate_fib(daily: list[dict], state: dict) -> tuple[list[str], dict]:
     """Avvisa quando una candela GIORNALIERA chiude oltre un livello Fibonacci.
     Ogni giornata viene valutata una sola volta (stato: last_daily_ts)."""
@@ -525,6 +587,8 @@ def main() -> int:
         daily = []
     fib_alerts, new_state = evaluate_fib(daily, new_state)
     alerts += fib_alerts
+    setup_alerts, new_state = evaluate_setups(daily, candles, new_state)
+    alerts += setup_alerts
     save_state(new_state)
     log.info("Stato: %s", new_state)
 
