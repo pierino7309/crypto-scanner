@@ -1,0 +1,41 @@
+name: News Bitcoin
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: news-bitcoin
+  cancel-in-progress: false
+
+jobs:
+  news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+
+      - name: Restore news state
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: news-${{ github.run_id }}
+          restore-keys: news-
+
+      - name: Run news watcher
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python news_watch.py
+
+      - name: Save news state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: news-${{ github.run_id }}
