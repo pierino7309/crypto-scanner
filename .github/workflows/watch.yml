@@ -1,0 +1,57 @@
+name: Sorveglianza continua
+
+# Un solo lavoro che resta acceso ~5h20 e fa partire i controlli a orari regolari
+# (notizie ogni 10 min, allarmi BTC ogni ora, Rainbow ogni mattina), poi si riavvia da solo.
+# Lo "schedule" ogni 2 ore serve solo da riserva se la catena si interrompe.
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: sorveglianza-continua
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: watch-${{ github.run_id }}
+          restore-keys: |
+            watch-
+            btc-alerts-
+
+      - name: Sorveglianza (~5h20)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python watch_loop.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: watch-${{ github.run_id }}
+
+      - name: Riavvia la sorveglianza
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run watch.yml --ref ${{ github.ref_name }}

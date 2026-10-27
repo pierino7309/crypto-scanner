@@ -1,8 +1,7 @@
 name: Rainbow chart giornaliero
 
 on:
-  schedule:
-    - cron: "30 6 * * *"
+  # orario spostato nella "Sorveglianza continua" (watch.yml)
   workflow_dispatch:
 
 jobs:

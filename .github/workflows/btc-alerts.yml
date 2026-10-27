@@ -1,8 +1,7 @@
 name: Allarmi BTC
 
 on:
-  schedule:
-    - cron: "0 * * * *"
+  # orario spostato nella "Sorveglianza continua" (watch.yml)
   workflow_dispatch: {}
 
 jobs:

@@ -1,8 +1,7 @@
 name: News Bitcoin
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # orario spostato nella "Sorveglianza continua" (watch.yml)
   workflow_dispatch: {}
 
 concurrency:
