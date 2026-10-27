@@ -351,7 +351,12 @@ SETUP_TOUCH = [
     ("short_tp2", SETUP["short_tp2"], "down", "🎯 Obiettivo 2 SHORT raggiunto (73.000): vicino alla media 200, valuta di chiudere tutto."),
     ("long_tp_84900", SETUP["a_tp2"], "up", "🎯 84.900 raggiunto: obiettivo 2 LONG A / obiettivo 1 LONG B. Prendi profitto e sposta lo stop."),
     ("long_tp_86400", SETUP["b_tp2"], "up", "🎯 86.400 raggiunto: obiettivo 2 LONG B."),
+    # Zone Glassnode / Coinbase (report Charting Crypto Q4 2026)
+    ("gn_res", 87000, "up", "🟥 ZONA GLASSNODE: BTC entra nella RESISTENZA 87.000–87.800 (già respinto 2 volte).\n   Attenzione: probabile rallentamento, aspetta la chiusura giornaliera."),
+    ("gn_os", 89600, "up", "⬜ ZONA GLASSNODE: BTC entra nell'OFFERTA SOPRA 89.600–93.700: molti venditori in questa zona."),
+    ("gn_sup", 75200, "down", "🟦 ZONA GLASSNODE: BTC tocca il SUPPORTO 74.500–75.200.\n   Zona d'acquisto forte: aspetta la chiusura giornaliera per vedere se regge."),
 ]
+GN = {"res_lo": 87000, "res_hi": 87800, "sup_lo": 74500, "sup_hi": 75200}
 
 
 def evaluate_setups(daily: list[dict], hourly: list[dict], state: dict) -> tuple[list[str], dict]:
@@ -379,6 +384,16 @@ def evaluate_setups(daily: list[dict], hourly: list[dict], state: dict) -> tuple
                           f"   Stop {S['a_stop']:,.0f} · Obiettivi {S['a_tp1']:,.0f} (metà) → {S['a_tp2']:,.0f}")
         if p0 >= S["a_stop"] > p1:
             alerts.append(f"⛔ SETUP LONG A: chiusura sotto lo stop {S['a_stop']:,.0f} $ → supporto rotto, ESCI dal long.")
+        if p0 <= GN["res_hi"] < p1:
+            alerts.append(f"🚀 ZONA GLASSNODE: chiusura giornaliera SOPRA la resistenza {GN['res_hi']:,.0f} $ ({p1:,.0f} $)\n"
+                          f"   Rottura al rialzo: prossima zona l'offerta sopra 89.600–93.700.")
+        if p0 >= GN["sup_lo"] > p1:
+            alerts.append(f"🐻 ZONA GLASSNODE: chiusura giornaliera SOTTO il supporto {GN['sup_lo']:,.0f} $ ({p1:,.0f} $)\n"
+                          f"   Supporto rotto: debolezza, prossimo riferimento la media 200 (~73.000).")
+        if last["high"] >= GN["res_lo"] and p1 < GN["res_lo"]:
+            alerts.append(f"↩️ ZONA GLASSNODE: respinto dalla resistenza (max {last['high']:,.0f}, chiusura {p1:,.0f} $).")
+        if last["low"] <= GN["sup_hi"] and p1 > GN["sup_hi"] and last["low"] >= GN["sup_lo"] * 0.995:
+            alerts.append(f"🟢 ZONA GLASSNODE: rimbalzo sul supporto (min {last['low']:,.0f}, chiusura {p1:,.0f} $).")
         if p0 >= S["b_stop"] > p1 and p0 > S["b_lvl"] * 0.97:
             alerts.append(f"⛔ SETUP LONG B: chiusura sotto lo stop {S['b_stop']:,.0f} $ → ESCI dal long B.")
         new_state["setup_daily_ts"] = last["ts"]
