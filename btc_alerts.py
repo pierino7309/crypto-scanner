@@ -414,6 +414,99 @@ def evaluate_setups(daily: list[dict], hourly: list[dict], state: dict) -> tuple
     return alerts, new_state
 
 
+# ---------------------------------------------------------------------------
+# Sorveglianza automatica supporto / resistenza (massimi e minimi recenti)
+# ---------------------------------------------------------------------------
+SR_PIVOT = 7          # un massimo/minimo è valido se è il più alto/basso di 7 giorni prima e dopo
+SR_DAYS = 150         # guarda gli ultimi 150 giorni
+SR_BREAK = 0.015      # rotto solo se la chiusura giornaliera lo supera di almeno l'1,5% (evita i falsi segnali)
+SR_MERGE = 0.012      # livelli più vicini dell'1,2% vengono uniti
+SR_MIN_DIST = 0.01    # supporto/resistenza ad almeno l'1% dal prezzo
+
+
+def find_swings(daily: list[dict]) -> list[float]:
+    """Massimi e minimi importanti (confermati) sulle candele giornaliere chiuse, uniti se vicini."""
+    d = daily[-SR_DAYS:]
+    k = SR_PIVOT
+    pts = []
+    for i in range(k, len(d) - k):
+        win = d[i - k:i + k + 1]
+        if d[i]["high"] == max(c["high"] for c in win):
+            pts.append(d[i]["high"])
+        if d[i]["low"] == min(c["low"] for c in win):
+            pts.append(d[i]["low"])
+    pts.sort()
+    merged: list[list[float]] = []
+    for x in pts:
+        if merged and x / merged[-1][-1] - 1 < SR_MERGE:
+            merged[-1].append(x)
+        else:
+            merged.append([x])
+    return [sum(g) / len(g) for g in merged]
+
+
+def nearest_sr(daily: list[dict]) -> tuple[float | None, float | None]:
+    """Supporto = livello più vicino SOTTO il prezzo; resistenza = più vicino SOPRA (almeno all'1%)."""
+    livelli = find_swings(daily)
+    price = daily[-1]["close"]
+    sotto = [x for x in livelli if x < price * (1 - SR_MIN_DIST)]
+    sopra = [x for x in livelli if x > price * (1 + SR_MIN_DIST)]
+    return (max(sotto) if sotto else None), (min(sopra) if sopra else None)
+
+
+def evaluate_sr(daily: list[dict], state: dict) -> tuple[list[str], dict]:
+    """Una volta al giorno: controlla se supporto o resistenza sono stati rotti
+    (o se si è formato un livello nuovo più vicino) e avvisa solo in quel caso."""
+    alerts: list[str] = []
+    new_state = dict(state)
+    if len(daily) < 2 * SR_PIVOT + 2 or daily[-1]["ts"] == state.get("sr_daily_ts"):
+        return alerts, new_state
+    new_state["sr_daily_ts"] = daily[-1]["ts"]
+    price = daily[-1]["close"]
+    fmt = lambda v: f"{v:,.0f} $" if v else "—"
+    cand_sup, cand_res = nearest_sr(daily)
+    old = state.get("sr") or {}
+    sup, res = old.get("sup"), old.get("res")
+    noti = [round(x) for x in find_swings(daily)]
+    gia_visti = set(state.get("sr_known") or noti)
+    nuovo = lambda v: v is not None and all(abs(v - k) / k > SR_MERGE for k in gia_visti)
+    new_state["sr_known"] = sorted(set(noti) | gia_visti)
+
+    if not old:
+        new_state["sr"] = {"sup": cand_sup, "res": cand_res}
+        new_state["sr_known"] = noti
+        alerts.append(f"📐 Sorveglianza supporto/resistenza ATTIVA (prezzo {price:,.0f} $)\n"
+                      f"   🟥 Resistenza: {fmt(cand_res)} · 🟦 Supporto: {fmt(cand_sup)}\n"
+                      f"   Ti avviso solo quando cambiano.")
+        return alerts, new_state
+
+    righe = []
+    if res and price > res * (1 + SR_BREAK):
+        righe.append(f"🚀 Resistenza {fmt(res)} ROTTA (chiusura {price:,.0f} $): ora può fare da supporto.")
+        sup, res = cand_sup, cand_res
+    elif sup and price < sup * (1 - SR_BREAK):
+        righe.append(f"🐻 Supporto {fmt(sup)} ROTTO (chiusura {price:,.0f} $): ora può fare da resistenza.")
+        sup, res = cand_sup, cand_res
+    else:
+        # solo massimi/minimi NUOVI (formati da poco) più vicini al prezzo
+        if nuovo(cand_res) and (res is None or cand_res < res * (1 - SR_MERGE)) and cand_res > price:
+            righe.append(f"🆕 Nuovo massimo importante: resistenza ora {fmt(cand_res)} (prima {fmt(res)})")
+            res = cand_res
+        if nuovo(cand_sup) and (sup is None or cand_sup > sup * (1 + SR_MERGE)) and cand_sup < price:
+            righe.append(f"🆕 Nuovo minimo importante: supporto ora {fmt(cand_sup)} (prima {fmt(sup)})")
+            sup = cand_sup
+        if res is None and cand_res:
+            res = cand_res
+        if sup is None and cand_sup:
+            sup = cand_sup
+    if righe:
+        dist = lambda v: f"{(v / price - 1) * 100:+.1f}%" if v else "—"
+        alerts.append("📐 CAMBIO supporto/resistenza\n   " + "\n   ".join(righe) +
+                      f"\n   Ora: 🟥 Resistenza {fmt(res)} ({dist(res)}) · 🟦 Supporto {fmt(sup)} ({dist(sup)})")
+    new_state["sr"] = {"sup": sup, "res": res}
+    return alerts, new_state
+
+
 def evaluate_fib(daily: list[dict], state: dict) -> tuple[list[str], dict]:
     """Avvisa quando una candela GIORNALIERA chiude oltre un livello Fibonacci.
     Ogni giornata viene valutata una sola volta (stato: last_daily_ts)."""
@@ -604,6 +697,8 @@ def main() -> int:
     alerts += fib_alerts
     setup_alerts, new_state = evaluate_setups(daily, candles, new_state)
     alerts += setup_alerts
+    sr_alerts, new_state = evaluate_sr(daily, new_state)
+    alerts += sr_alerts
     save_state(new_state)
     log.info("Stato: %s", new_state)
 
