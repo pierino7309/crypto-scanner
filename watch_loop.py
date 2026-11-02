@@ -9,6 +9,7 @@ unico lavoro di GitHub Actions e fa partire i controlli a orari regolari:
   - news_watch.py   ogni 10 minuti  (notizie Bitcoin)
   - btc_alerts.py   ogni ora, al minuto 5 (allarmi, Fibonacci, setup, zone, S/R)
   - rainbow_alert.py una volta al giorno dopo le 8:30 ora italiana
+  - events_alert.py  una volta al giorno dopo le 8:00 (promemoria eventi del giorno)
 
 Alla fine il workflow si riavvia da solo (watch.yml).
 """
@@ -45,19 +46,25 @@ def prossima_ora(ts: float) -> float:
     return base if base > ts else base + 3600
 
 
-def rainbow_se_serve() -> None:
+def una_volta_al_giorno(script: str, ora_minuto: tuple[int, int], nome_stato: str) -> None:
+    """Lancia lo script una sola volta al giorno, dopo l'ora indicata (ora italiana)."""
     oggi = datetime.now(ROME)
-    if (oggi.hour, oggi.minute) < RAINBOW_ORA:
+    if (oggi.hour, oggi.minute) < ora_minuto:
         return
-    f = STATE / "rainbow_last_date"
+    f = STATE / nome_stato
     try:
         if f.read_text().strip() == oggi.strftime("%Y-%m-%d"):
             return
     except Exception:
         pass
-    lancia("rainbow_alert.py")
+    lancia(script)
     STATE.mkdir(exist_ok=True)
     f.write_text(oggi.strftime("%Y-%m-%d"))
+
+
+def rainbow_se_serve() -> None:
+    una_volta_al_giorno("rainbow_alert.py", RAINBOW_ORA, "rainbow_last_date")
+    una_volta_al_giorno("events_alert.py", (8, 0), "events_last_date")
 
 
 def main() -> int:
